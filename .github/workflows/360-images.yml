@@ -1,0 +1,105 @@
+name: "360 Images"
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: 360-images-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: Dependency Audit
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+
+      - name: Audit
+        run: bun audit --audit-level=high
+
+  build:
+    name: Build ${{ matrix.image }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: cap-web
+            context: .
+            file: apps/web/Dockerfile
+          - image: cap-media-server
+            context: apps/media-server
+            file: apps/media-server/Dockerfile.standalone
+    env:
+      IMAGE: cap360/${{ matrix.image }}:${{ github.sha }}
+      TARBALL: /tmp/${{ matrix.image }}.tar
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Free Disk Space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+
+      - name: Create .env file
+        if: matrix.image == 'cap-web'
+        run: |
+          echo "WEB_URL=http://localhost:3000" > .env
+          echo "NEXT_PUBLIC_DOCKER_BUILD=true" >> .env
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.file }}
+          platforms: linux/amd64
+          tags: ${{ env.IMAGE }}
+          outputs: type=docker,dest=${{ env.TARBALL }}
+          cache-from: type=gha,scope=360-${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=360-${{ matrix.image }},ignore-error=true
+
+      # fail the build if the runtime is below the current security floor
+      - name: Check Runtime
+        run: |
+          docker load -i "$TARBALL"
+          if [ "${{ matrix.image }}" = "cap-web" ]; then
+            docker run --rm --entrypoint node "$IMAGE" -e '
+              const floors = { 22: [23, 4], 24: [22, 1], 26: [12, 1] };
+              const [major, minor, patch] = process.versions.node.split(".").map(Number);
+              const floor = floors[major];
+              const ok = !!floor && (minor > floor[0] || (minor === floor[0] && patch >= floor[1]));
+              console.log(`node ${process.versions.node} ${ok ? "ok" : "is below the security floor"}`);
+              process.exit(ok ? 0 : 1);
+            '
+          else
+            docker run --rm --entrypoint bun "$IMAGE" --version
+            docker run --rm --entrypoint ffmpeg "$IMAGE" -hide_banner -version | head -1
+          fi
+
+      - name: Compress Image
+        run: zstd -T0 -3 --rm "$TARBALL" -o "$TARBALL.zst"
+
+      - name: Upload Image
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.image }}
+          path: ${{ env.TARBALL }}.zst
+          retention-days: 30
+          compression-level: 0
+          if-no-files-found: error
