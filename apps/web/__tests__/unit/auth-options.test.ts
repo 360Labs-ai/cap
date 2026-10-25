@@ -103,6 +103,11 @@ const CONTEXT: SsoAuthContext = {
 	},
 };
 const AUTHENTICATED_USER = { id: "authenticated-user", email: PROFILE.email };
+const GOOGLE_WORKSPACE_PROFILE = {
+	sub: "google-user",
+	email_verified: true,
+	hd: "company.example",
+};
 
 function callbacksFor(options: NextAuthOptions) {
 	const signIn = options.callbacks?.signIn;
@@ -432,6 +437,7 @@ describe("authOptions", () => {
 			callbacks.signIn({
 				user: { id: "u1", email: "Anyone@Blocked.example" },
 				account: { provider: "google", providerAccountId: "g1", type: "oauth" },
+				profile: GOOGLE_WORKSPACE_PROFILE,
 			}),
 		).resolves.toBe("/login?error=SignupBlocked");
 		await expect(
@@ -449,6 +455,7 @@ describe("authOptions", () => {
 			callbacks.signIn({
 				user: { id: "u3", email: "else@other.example" },
 				account: { provider: "google", providerAccountId: "g3", type: "oauth" },
+				profile: GOOGLE_WORKSPACE_PROFILE,
 			}),
 		).resolves.toBe(true);
 	});
@@ -484,6 +491,35 @@ describe("authOptions", () => {
 			callbacks.signIn({
 				user: { id: "u1", email: "anyone@blocked.example" },
 				account: { provider: "google", providerAccountId: "g1", type: "oauth" },
+				profile: GOOGLE_WORKSPACE_PROFILE,
+			}),
+		).resolves.toBe(true);
+	});
+
+	// Google logins link to an existing account by email, so a personal Google
+	// account made on a work address must be turned away.
+	it("only accepts verified Google Workspace accounts", async () => {
+		const callbacks = callbacksFor(authOptions(CONTEXT));
+		const account: Account = {
+			provider: "google",
+			providerAccountId: "g1",
+			type: "oauth",
+		};
+		for (const profile of [
+			undefined,
+			{ sub: "google-user", email_verified: true },
+			{ sub: "google-user", email_verified: false, hd: "company.example" },
+			{ sub: "google-user", hd: "company.example" },
+		]) {
+			await expect(
+				callbacks.signIn({ user: AUTHENTICATED_USER, account, profile }),
+			).resolves.toBe("/login?error=GoogleWorkspaceOnly");
+		}
+		await expect(
+			callbacks.signIn({
+				user: AUTHENTICATED_USER,
+				account,
+				profile: GOOGLE_WORKSPACE_PROFILE,
 			}),
 		).resolves.toBe(true);
 	});

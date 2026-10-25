@@ -172,6 +172,9 @@ export const authOptions = (ssoContext?: SsoAuthContext): NextAuthOptions => {
 							prompt: "select_account",
 						},
 					},
+					// Lets a Google login join an account first made with an email code.
+					// Safe because signIn only accepts verified Workspace accounts here.
+					allowDangerousEmailAccountLinking: true,
 				}),
 				...(serverEnv().WORKOS_CLIENT_ID && serverEnv().WORKOS_API_KEY
 					? [
@@ -328,6 +331,14 @@ export const authOptions = (ssoContext?: SsoAuthContext): NextAuthOptions => {
 					const claims = profile as OidcClaims | undefined;
 					if (!claims?.email || claims.email_verified !== true) {
 						return "/login?error=OidcEmailUnverified";
+					}
+				}
+				// Google logins link by email, so a personal Google account made on
+				// a work address must not get in.
+				if (account?.provider === "google") {
+					const claims = profile as (OidcClaims & { hd?: string }) | undefined;
+					if (claims?.email_verified !== true || !claims.hd) {
+						return "/login?error=GoogleWorkspaceOnly";
 					}
 				}
 				if (account?.provider === "workos") {
