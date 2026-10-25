@@ -1072,3 +1072,114 @@ describe("SSO domain normalization", () => {
 		expect(getSsoEmailDomain("alex@company.example")).toBe("company.example");
 	});
 });
+
+describe("Email domain auto join", () => {
+	const AUTO_JOIN = {
+		emailDomain: "company.example",
+		organizationId: ORGANIZATION_ID,
+	};
+
+	function makeAutoJoinFixture(
+		autoJoin: typeof AUTO_JOIN | null = AUTO_JOIN,
+	) {
+		const fixture = makeFixture();
+		fixture.rows(Db.users).splice(0, 1);
+		fixture.rows(Db.organizationInvites).splice(0);
+		mocks.stripe.mockReset().mockReturnValue({
+			customers: {
+				list: async () => ({ data: [] }),
+				create: async () => ({ id: "cus_test", metadata: {} }),
+			},
+			subscriptions: { list: async () => ({ data: [] }) },
+		});
+		const adapter = DrizzleAdapter(
+			fixture.client as unknown as MySql2Database,
+			{ getSsoIdentity: () => null, getAutoJoin: () => autoJoin ?? undefined },
+		);
+		if (!adapter.createUser) throw new Error("Missing createUser");
+		return { fixture, createUser: adapter.createUser };
+	}
+
+	it("adds a new user on the domain to the configured organization", async () => {
+		const { fixture, createUser } = makeAutoJoinFixture();
+		const user = await createUser({
+			email: "Sam@Company.Example",
+			emailVerified: null,
+		});
+
+		expect(fixture.rows(Db.organizations)).toHaveLength(2);
+		expect(fixture.rows(Db.organizationMembers)).toEqual([
+			expect.objectContaining({
+				userId: user.id,
+				organizationId: ORGANIZATION_ID,
+				role: "member",
+			}),
+		]);
+		expect(user).toEqual(
+			expect.objectContaining({
+				email: "sam@company.example",
+				activeOrganizationId: ORGANIZATION_ID,
+				defaultOrgId: ORGANIZATION_ID,
+				marketingOrigin: "teammate",
+				onboardingSteps: expect.objectContaining({
+					organizationSetup: true,
+					customDomain: true,
+					inviteTeam: true,
+				}),
+			}),
+		);
+	});
+
+	it("does not auto join without a verified Google sign-in", async () => {
+		const { fixture, createUser } = makeAutoJoinFixture(null);
+		const user = await createUser({
+			email: "sam@company.example",
+			emailVerified: null,
+		});
+
+		expect(fixture.rows(Db.organizations)).toHaveLength(3);
+		expect(fixture.rows(Db.organizationMembers)).toEqual([
+			expect.objectContaining({ userId: user.id, role: "owner" }),
+		]);
+	});
+
+	it("gives other domains and subdomains their own organization", async () => {
+		for (const email of ["sam@other.example", "sam@sub.company.example"]) {
+			const { fixture, createUser } = makeAutoJoinFixture();
+			const user = await createUser({ email, emailVerified: null });
+
+			expect(fixture.rows(Db.organizations)).toHaveLength(3);
+			expect(fixture.rows(Db.organizationMembers)).toEqual([
+				expect.objectContaining({ userId: user.id, role: "owner" }),
+			]);
+		}
+	});
+
+	it("leaves a pending invite to the invite flow", async () => {
+		const { fixture, createUser } = makeAutoJoinFixture();
+		fixture.rows(Db.organizationInvites).push({
+			id: "pending-invite",
+			organizationId: OTHER_ORGANIZATION_ID,
+			invitedEmail: "sam@company.example",
+			status: "pending",
+		});
+		await createUser({ email: "sam@company.example", emailVerified: null });
+
+		expect(fixture.rows(Db.organizations)).toHaveLength(2);
+		expect(fixture.rows(Db.organizationMembers)).toEqual([]);
+	});
+
+	it("falls back to a personal organization when the target is deleted", async () => {
+		const { fixture, createUser } = makeAutoJoinFixture();
+		fixture.organization.tombstoneAt = new Date();
+		const user = await createUser({
+			email: "sam@company.example",
+			emailVerified: null,
+		});
+
+		expect(fixture.rows(Db.organizations)).toHaveLength(3);
+		expect(fixture.rows(Db.organizationMembers)).toEqual([
+			expect.objectContaining({ userId: user.id, role: "owner" }),
+		]);
+	});
+});

@@ -71,6 +71,13 @@ function createServerEnv() {
 			GOOGLE_CLIENT_ID: z.string().optional(),
 			GOOGLE_CLIENT_SECRET: z.string().optional(),
 
+			/// Auto join
+			// Set both so brand new users signing in with a verified Workspace
+			// Google account on exactly this domain join this organization
+			// instead of getting their own.
+			AUTO_JOIN_EMAIL_DOMAIN: z.string().optional(),
+			AUTO_JOIN_ORGANIZATION_ID: z.string().optional(),
+
 			APPLE_CLIENT_ID: z.string().optional(),
 			APPLE_CLIENT_SECRET: z.string().optional(),
 

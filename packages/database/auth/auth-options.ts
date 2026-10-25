@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { serverEnv } from "@cap/env";
-import { User } from "@cap/web-domain";
+import { Organisation, User } from "@cap/web-domain";
 import { eq } from "drizzle-orm";
 import type { NextAuthOptions } from "next-auth";
 import { getServerSession as _getServerSession } from "next-auth";
@@ -20,7 +20,7 @@ import {
 	isEmailAllowedForSignup,
 	isEmailBlockedFromSignup,
 } from "./domain-utils.ts";
-import { DrizzleAdapter } from "./drizzle-adapter.ts";
+import { type AutoJoinConfig, DrizzleAdapter } from "./drizzle-adapter.ts";
 import {
 	provisionSsoMembership,
 	type SsoAuthContext,
@@ -76,16 +76,31 @@ type OidcClaims = {
 	picture?: string;
 };
 
+function getAutoJoinConfig(): AutoJoinConfig | undefined {
+	const emailDomain = serverEnv().AUTO_JOIN_EMAIL_DOMAIN?.trim().toLowerCase();
+	const organizationId = serverEnv().AUTO_JOIN_ORGANIZATION_ID?.trim();
+	if (!emailDomain || !organizationId) return undefined;
+	return {
+		emailDomain,
+		organizationId: Organisation.OrganisationId.make(organizationId),
+	};
+}
+
 export const authOptions = (ssoContext?: SsoAuthContext): NextAuthOptions => {
 	let _adapter: Adapter | undefined;
 	let _providers: Provider[] | undefined;
 	let validatedSsoIdentity: ValidatedSsoIdentity | null = null;
+	// Only signIn sets this, and only for a verified Workspace Google account
+	// on the auto join domain, so an email code alone never joins the team.
+	let autoJoinVerified = false;
 
 	return {
 		get adapter() {
 			if (_adapter) return _adapter;
 			_adapter = DrizzleAdapter(db(), {
 				getSsoIdentity: () => validatedSsoIdentity,
+				getAutoJoin: () =>
+					autoJoinVerified ? getAutoJoinConfig() : undefined,
 			});
 			return _adapter;
 		},
@@ -327,6 +342,7 @@ export const authOptions = (ssoContext?: SsoAuthContext): NextAuthOptions => {
 		},
 		callbacks: {
 			async signIn({ user, email, credentials, account, profile }) {
+				autoJoinVerified = false;
 				if (account?.provider === OIDC_PROVIDER_ID) {
 					const claims = profile as OidcClaims | undefined;
 					if (!claims?.email || claims.email_verified !== true) {
@@ -340,6 +356,8 @@ export const authOptions = (ssoContext?: SsoAuthContext): NextAuthOptions => {
 					if (claims?.email_verified !== true || !claims.hd) {
 						return "/login?error=GoogleWorkspaceOnly";
 					}
+					autoJoinVerified =
+						claims.hd.toLowerCase() === getAutoJoinConfig()?.emailDomain;
 				}
 				if (account?.provider === "workos") {
 					validatedSsoIdentity = null;

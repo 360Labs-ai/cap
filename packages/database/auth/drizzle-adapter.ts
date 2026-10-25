@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { STRIPE_AVAILABLE } from "@cap/utils";
 import { type ImageUpload, Organisation, User } from "@cap/web-domain";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import type { MySql2Database } from "drizzle-orm/mysql2";
 import type { Adapter } from "next-auth/adapters";
 import { nanoId } from "../helpers.ts";
@@ -80,9 +80,41 @@ async function hasLinkedAccount(db: MySql2Database, userId: User.UserId) {
 	return !!linkedAccount;
 }
 
+export type AutoJoinConfig = {
+	emailDomain: string;
+	organizationId: Organisation.OrganisationId;
+};
+
+async function findAutoJoinOrganization(
+	db: Pick<MySql2Database, "select">,
+	email: string,
+	autoJoin: AutoJoinConfig | undefined,
+) {
+	if (!autoJoin) return undefined;
+	if (email.slice(email.lastIndexOf("@") + 1) !== autoJoin.emailDomain) {
+		return undefined;
+	}
+
+	const [organization] = await db
+		.select({ id: organizations.id })
+		.from(organizations)
+		.where(
+			and(
+				eq(organizations.id, autoJoin.organizationId),
+				isNull(organizations.tombstoneAt),
+			),
+		)
+		.for("share");
+
+	return organization;
+}
+
 export function DrizzleAdapter(
 	db: MySql2Database,
-	options?: { getSsoIdentity: () => ValidatedSsoIdentity | null },
+	options?: {
+		getSsoIdentity: () => ValidatedSsoIdentity | null;
+		getAutoJoin?: () => AutoJoinConfig | undefined;
+	},
 ): Adapter {
 	return {
 		async createUser(userData: CreateUserData) {
@@ -143,6 +175,17 @@ export function DrizzleAdapter(
 					)
 					.limit(1);
 
+				// A new user on the configured email domain joins that team
+				// instead of getting a personal one. An invite or SSO wins.
+				const autoJoinOrganization =
+					pendingInvite || ssoIdentity
+						? undefined
+						: await findAutoJoinOrganization(
+								tx,
+								normalizedEmail,
+								options?.getAutoJoin?.(),
+							);
+
 				const insertUser = tx.insert(users).values({
 					id: userId,
 					email: normalizedEmail,
@@ -151,7 +194,9 @@ export function DrizzleAdapter(
 					image: userData.image as ImageUpload.ImageUrlOrKey | null,
 					activeOrganizationId: Organisation.OrganisationId.make(""),
 					marketingOrigin:
-						pendingInvite || ssoIdentity ? "teammate" : "independent",
+						pendingInvite || ssoIdentity || autoJoinOrganization
+							? "teammate"
+							: "independent",
 				});
 				if (ssoIdentity) {
 					await insertUser.onDuplicateKeyUpdate({
@@ -170,6 +215,29 @@ export function DrizzleAdapter(
 
 				await enqueueLoopsSync(tx, userId);
 				if (pendingInvite || ssoIdentity) {
+					return;
+				}
+
+				if (autoJoinOrganization) {
+					await tx.insert(organizationMembers).values({
+						id: nanoId(),
+						organizationId: autoJoinOrganization.id,
+						userId,
+						role: "member",
+					});
+					await tx
+						.update(users)
+						.set({
+							activeOrganizationId: autoJoinOrganization.id,
+							defaultOrgId: autoJoinOrganization.id,
+							// Same as accepting an invite: the team is already set up.
+							onboardingSteps: {
+								organizationSetup: true,
+								customDomain: true,
+								inviteTeam: true,
+							},
+						})
+						.where(eq(users.id, userId));
 					return;
 				}
 

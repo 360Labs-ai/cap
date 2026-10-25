@@ -12,6 +12,7 @@ import { MySqlDialect } from "drizzle-orm/mysql-core";
 import type { Account, NextAuthOptions } from "next-auth";
 import type { Adapter } from "next-auth/adapters";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { AutoJoinConfig } from "../../../../packages/database/auth/drizzle-adapter";
 
 type AuthUser = {
 	id: string;
@@ -31,7 +32,10 @@ const mocks = vi.hoisted(() => ({
 	adapter: vi.fn<
 		(
 			client: unknown,
-			options: { getSsoIdentity: () => ValidatedSsoIdentity | null },
+			options: {
+				getSsoIdentity: () => ValidatedSsoIdentity | null;
+				getAutoJoin?: () => AutoJoinConfig | undefined;
+			},
 		) => Adapter
 	>(() => ({})),
 }));
@@ -43,6 +47,8 @@ const env = vi.hoisted(() => ({
 	CAP_BLOCKED_SIGNUP_DOMAINS: undefined as string | undefined,
 	GOOGLE_CLIENT_ID: "google-client",
 	GOOGLE_CLIENT_SECRET: "google-secret",
+	AUTO_JOIN_EMAIL_DOMAIN: undefined as string | undefined,
+	AUTO_JOIN_ORGANIZATION_ID: undefined as string | undefined,
 	NEXTAUTH_SECRET: "next-auth-secret",
 	OIDC_ISSUER: undefined as string | undefined,
 	OIDC_CLIENT_ID: undefined as string | undefined,
@@ -136,6 +142,8 @@ describe("authOptions", () => {
 		env.OIDC_CLIENT_SECRET = undefined;
 		env.CAP_ALLOWED_SIGNUP_DOMAINS = undefined;
 		env.CAP_BLOCKED_SIGNUP_DOMAINS = undefined;
+		env.AUTO_JOIN_EMAIL_DOMAIN = undefined;
+		env.AUTO_JOIN_ORGANIZATION_ID = undefined;
 		env.TRUSTED_PROXY_AUTH_HEADER = undefined;
 		env.TRUSTED_PROXY_AUTH_EMAIL = undefined;
 		env.TRUSTED_PROXY_AUTH_SECRET = undefined;
@@ -522,6 +530,39 @@ describe("authOptions", () => {
 				profile: GOOGLE_WORKSPACE_PROFILE,
 			}),
 		).resolves.toBe(true);
+	});
+
+	it("auto joins only after a verified Google Workspace sign-in on the domain", async () => {
+		env.AUTO_JOIN_EMAIL_DOMAIN = " Company.Example ";
+		env.AUTO_JOIN_ORGANIZATION_ID = "team-org";
+		const account: Account = {
+			provider: "google",
+			providerAccountId: "g1",
+			type: "oauth",
+		};
+		const signInAs = async (profile: typeof GOOGLE_WORKSPACE_PROFILE) => {
+			const options = authOptions(CONTEXT);
+			expect(options.adapter).toBeDefined();
+			const adapterOptions = mocks.adapter.mock.lastCall?.[1];
+			expect(adapterOptions?.getAutoJoin?.()).toBeUndefined();
+			await callbacksFor(options).signIn({
+				user: AUTHENTICATED_USER,
+				account,
+				profile,
+			});
+			return adapterOptions?.getAutoJoin?.();
+		};
+
+		await expect(
+			signInAs({ ...GOOGLE_WORKSPACE_PROFILE, hd: "other.example" }),
+		).resolves.toBeUndefined();
+		await expect(
+			signInAs({ ...GOOGLE_WORKSPACE_PROFILE, email_verified: false }),
+		).resolves.toBeUndefined();
+		await expect(signInAs(GOOGLE_WORKSPACE_PROFILE)).resolves.toEqual({
+			emailDomain: "company.example",
+			organizationId: "team-org",
+		});
 	});
 
 	it("validates the raw WorkOS profile before exposing it to the adapter", async () => {
